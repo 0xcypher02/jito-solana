@@ -289,6 +289,49 @@ impl SlotMetaWorkingSetEntry {
     }
 }
 
+/// FIREDANCER: Insert shreds received from the shred tile into the blockstore
+#[no_mangle]
+pub extern "C" fn fd_ext_blockstore_insert_shreds(blockstore: *const std::ffi::c_void, shred_cnt: u64, shred_bytes: *const u8, shred_sz: u64, stride: u64, is_trusted: i32) {
+    let blockstore = unsafe { &*(blockstore as *const Blockstore) };
+    let shred_bytes = unsafe { std::slice::from_raw_parts(shred_bytes, (stride * (shred_cnt - 1) + shred_sz) as usize) };
+    let shreds = (0..shred_cnt).map(|i| {
+        let shred: &[u8] = &shred_bytes[(stride*i) as usize..(stride*i+shred_sz) as usize];
+        Shred::new_from_serialized_shred(shred.to_vec()).unwrap()
+    }).collect();
+
+    /* The unwrap() here is not a mistake or laziness.  We do not
+       expect inserting shreds to fail, and cannot recover if it does.
+       Solana Labs panics if this happens and Firedancer will as well. */
+    blockstore.insert_shreds(shreds, None, is_trusted!=0).unwrap();
+}
+
+/// FIREDANCER: Create a new blockstore with block 0 filled with the provided
+/// shreds at the provided ledger path.  This is used to create a blockstore
+/// archive for the genesis block.
+#[no_mangle]
+pub extern "C" fn fd_ext_blockstore_create_block0(ledger_path: *const i8, shred_cnt: u64, shred_bytes: *const u8, shred_sz: u64, stride: u64) {
+    let ledger_path = Path::new(unsafe { std::ffi::CStr::from_ptr(ledger_path).to_str().unwrap() });
+    Blockstore::destroy(ledger_path).unwrap();
+    let blockstore = Blockstore::open_with_options(
+        ledger_path,
+        BlockstoreOptions {
+            access_type: AccessType::Primary,
+            recovery_mode: None,
+            enforce_ulimit_nofile: false,
+            column_options: LedgerColumnOptions::default(),
+        },
+    ).unwrap();
+
+    let shred_bytes = unsafe { std::slice::from_raw_parts(shred_bytes, (stride * (shred_cnt - 1) + shred_sz) as usize) };
+    let shreds = (0..shred_cnt).map(|i| {
+        let shred: &[u8] = &shred_bytes[(stride*i) as usize..(stride*i+shred_sz) as usize];
+        Shred::new_from_serialized_shred(shred.to_vec()).unwrap()
+    }).collect();
+    blockstore.insert_shreds(shreds, None, false).unwrap();
+    blockstore.set_roots(std::iter::once(&0)).unwrap();
+}
+
+
 impl Blockstore {
     pub fn db(self) -> Arc<Database> {
         self.db
@@ -4677,31 +4720,38 @@ pub fn create_new_ledger(
     drop(blockstore);
 
     let archive_path = ledger_path.join(DEFAULT_GENESIS_ARCHIVE);
-    let args = vec![
-        "jcfhS",
-        archive_path.to_str().unwrap(),
-        "-C",
-        ledger_path.to_str().unwrap(),
-        DEFAULT_GENESIS_FILE,
-        blockstore_dir,
-    ];
-    let output = std::process::Command::new("tar")
-        .args(args)
-        .output()
-        .unwrap();
-    if !output.status.success() {
-        use std::str::from_utf8;
-        error!("tar stdout: {}", from_utf8(&output.stdout).unwrap_or("?"));
-        error!("tar stderr: {}", from_utf8(&output.stderr).unwrap_or("?"));
-
-        return Err(BlockstoreError::Io(IoError::new(
-            ErrorKind::Other,
-            format!(
-                "Error trying to generate snapshot archive: {}",
-                output.status
-            ),
-        )));
-    }
+     // FIREDANCER: We switch from assuming tar command exists locally to linking
+    // the library. This resolves some deployment and debugging issues.
+    let mut archive = tar::Builder::new(bzip2::write::BzEncoder::new(std::fs::File::create(&archive_path)?, bzip2::Compression::default()));
+    archive.append_path_with_name(ledger_path.join(DEFAULT_GENESIS_FILE), DEFAULT_GENESIS_FILE)?;
+    archive.append_dir_all("rocksdb", ledger_path.join(blockstore_dir))?;
+    archive.finish()?;
+    drop(archive);
+    // let args = vec![
+    //     "jcfhS",
+    //     archive_path.to_str().unwrap(),
+    //     "-C",
+    //     ledger_path.to_str().unwrap(),
+    //     DEFAULT_GENESIS_FILE,
+    //     blockstore_dir,
+    // ];
+    // let output = std::process::Command::new("tar")
+    //     .args(args)
+    //     .output()
+    //     .unwrap();
+    // if !output.status.success() {
+    //     use std::str::from_utf8;
+    //     error!("tar stdout: {}", from_utf8(&output.stdout).unwrap_or("?"));
+    //     error!("tar stderr: {}", from_utf8(&output.stderr).unwrap_or("?"));
+    //
+    //     return Err(BlockstoreError::Io(IoError::new(
+    //         ErrorKind::Other,
+    //         format!(
+    //             "Error trying to generate snapshot archive: {}",
+    //             output.status
+    //         ),
+    //     )));
+    // }
 
     // ensure the genesis archive can be unpacked and it is under
     // max_genesis_archive_unpacked_size, immediately after creating it above.

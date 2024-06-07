@@ -2661,7 +2661,7 @@ impl ClusterInfo {
         }
         fd_ext_poh_publish_cluster_info(memory.as_ptr(), 8 + len as u64 * 38);
     }
-    
+
     pub(crate) fn start_socket_consume_thread(
         self: Arc<Self>,
         receiver: PacketBatchReceiver,
@@ -2697,6 +2697,7 @@ impl ClusterInfo {
         response_sender: PacketBatchSender,
         should_check_duplicate_instance: bool,
         exit: Arc<AtomicBool>,
+        send_firedancer: bool,
     ) -> JoinHandle<()> {
         let mut last_print = Instant::now();
         let recycler = PacketBatchRecycler::default();
@@ -2708,6 +2709,13 @@ impl ClusterInfo {
         Builder::new()
             .name("solGossipListen".to_string())
             .spawn(move || {
+                 // FIREDANCER: We should send a cluster node contact update immediately
+                 let mut last_update = if send_firedancer {
+                    Some(Instant::now() - Duration::from_secs(5))
+                } else {
+                    None
+                };
+                
                 while !exit.load(Ordering::Relaxed) {
                     if let Err(err) = self.run_listen(
                         &recycler,
@@ -2717,6 +2725,7 @@ impl ClusterInfo {
                         &thread_pool,
                         &mut last_print,
                         should_check_duplicate_instance,
+                        &mut last_update,
                     ) {
                         match err {
                             GossipError::RecvTimeoutError(RecvTimeoutError::Disconnected) => break,

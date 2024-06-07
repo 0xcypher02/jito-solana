@@ -65,7 +65,7 @@ pub fn first_of_consecutive_leader_slots(slot: Slot) -> Slot {
     (slot / NUM_CONSECUTIVE_LEADER_SLOTS) * NUM_CONSECUTIVE_LEADER_SLOTS
 }
 
-fn sort_stakes(stakes: &mut Vec<(Pubkey, u64)>) {
+pub fn sort_stakes(stakes: &mut Vec<(Pubkey, u64)>) {
     // Sort first by stake. If stakes are the same, sort by pubkey to ensure a
     // deterministic result.
     // Note: Use unstable sort, because we dedup right after to remove the equal elements.

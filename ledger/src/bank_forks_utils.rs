@@ -101,6 +101,7 @@ pub fn load(
         accounts_update_notifier,
         exit,
         true,
+        false
     )?;
     blockstore_processor::process_blockstore_from_root(
         blockstore,
@@ -130,6 +131,8 @@ pub fn load_bank_forks(
     accounts_update_notifier: Option<AccountsUpdateNotifier>,
     exit: Arc<AtomicBool>,
     ignore_halt_at_slot_for_snapshot_loading: bool,
+     // FIREDANCER: Pass application name through so leader schedule cache can find the shared workspaces.
+     firedancer_send: bool,
 ) -> LoadResult {
     fn get_snapshots_to_load(
         snapshot_config: Option<&SnapshotConfig>,
@@ -225,8 +228,10 @@ pub fn load_bank_forks(
             (bank_forks, None)
         };
 
+        let bank = &bank_forks.read().unwrap().root_bank();
+        
     let mut leader_schedule_cache =
-        LeaderScheduleCache::new_from_bank(&bank_forks.read().unwrap().root_bank());
+    LeaderScheduleCache::new(bank.epoch_schedule().clone(), bank, firedancer_send);
     if process_options.full_leader_cache {
         leader_schedule_cache.set_max_schedules(std::usize::MAX);
     }

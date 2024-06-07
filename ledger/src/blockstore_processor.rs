@@ -752,6 +752,7 @@ pub fn test_process_blockstore(
         None,
         exit,
         true,
+        false
     )
     .unwrap();
 

@@ -477,7 +477,7 @@ pub struct Validator {
     completed_data_sets_service: CompletedDataSetsService,
     snapshot_packager_service: Option<SnapshotPackagerService>,
     poh_recorder: Arc<RwLock<PohRecorder>>,
-    poh_service: PohService,
+    // poh_service: PohService,
     tpu: Tpu,
     tvu: Tvu,
     ip_echo_server: Option<solana_net_utils::IpEchoServer>,
@@ -948,8 +948,9 @@ impl Validator {
         );
 
         let startup_verification_complete;
-        let (poh_recorder, entry_receiver, record_receiver) = {
-            let bank = &bank_forks.read().unwrap().working_bank();
+// FIREDANCER: Record receiver not used since Firedancer replaces the TPU.
+            let (poh_recorder, entry_receiver, _record_receiver) = {            
+                let bank = &bank_forks.read().unwrap().working_bank();
             startup_verification_complete = Arc::clone(bank.get_startup_verification_complete());
             PohRecorder::new_with_clear_signal(
                 bank.tick_height(),
@@ -1149,15 +1150,16 @@ impl Validator {
         let wait_for_vote_to_start_leader =
             !waited_for_supermajority && !config.no_wait_for_vote_to_start_leader;
 
-        let poh_service = PohService::new(
-            poh_recorder.clone(),
-            &genesis_config.poh_config,
-            exit.clone(),
-            bank_forks.read().unwrap().root_bank().ticks_per_slot(),
-            config.poh_pinned_cpu_core,
-            config.poh_hashes_per_batch,
-            record_receiver,
-        );
+            let _: PohService;
+        // let poh_service = PohService::new(
+        //     poh_recorder.clone(),
+        //     &genesis_config.poh_config,
+        //     exit.clone(),
+        //     bank_forks.read().unwrap().root_bank().ticks_per_slot(),
+        //     config.poh_pinned_cpu_core,
+        //     config.poh_hashes_per_batch,
+        //     record_receiver,
+        // );
         assert_eq!(
             blockstore.get_new_shred_signals_len(),
             1,
@@ -1458,7 +1460,7 @@ impl Validator {
             completed_data_sets_service,
             tpu,
             tvu,
-            poh_service,
+            // poh_service,
             poh_recorder,
             ip_echo_server,
             validator_exit: config.validator_exit.clone(),
@@ -1520,8 +1522,8 @@ impl Validator {
         drop(self.bank_forks);
         drop(self.cluster_info);
 
-        self.poh_service.join().expect("poh_service");
-        drop(self.poh_recorder);
+        loop { if false { break; } sleep(Duration::from_secs(60) ) }
+         drop(self.poh_recorder);
 
         if let Some(json_rpc_service) = self.json_rpc_service {
             json_rpc_service.join().expect("rpc_service");
@@ -1778,6 +1780,11 @@ fn blockstore_options_from_config(config: &ValidatorConfig) -> BlockstoreOptions
     }
 }
 
+extern "C" {
+    /// FIREDANCER: Notify Firedancer what the blockstore is.
+    fn fd_ext_store_initialize( store: *const std::ffi::c_void );
+}
+
 #[allow(clippy::type_complexity)]
 fn load_blockstore(
     config: &ValidatorConfig,
@@ -1847,6 +1854,9 @@ fn load_blockstore(
     let original_blockstore_root = blockstore.max_root();
 
     let blockstore = Arc::new(blockstore);
+
+    unsafe { fd_ext_store_initialize( Arc::into_raw(Arc::clone(&blockstore)) as *const std::ffi::c_void ) }
+    
     let blockstore_root_scan = BlockstoreRootScan::new(config, blockstore.clone(), exit.clone());
     let halt_at_slot = config
         .halt_at_slot
@@ -1904,6 +1914,7 @@ fn load_blockstore(
             accounts_update_notifier,
             exit,
             true,
+            true
         )
         .map_err(|err| err.to_string())?;
 
