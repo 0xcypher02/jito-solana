@@ -2569,6 +2569,7 @@ impl ClusterInfo {
         thread_pool: &ThreadPool,
         last_print: &mut Instant,
         should_check_duplicate_instance: bool,
+        send_firedancer: &mut Option<Instant>,
     ) -> Result<(), GossipError> {
         let _st = ScopedTimer::from(&self.stats.gossip_listen_loop_time);
         const RECV_TIMEOUT: Duration = Duration::from_secs(1);
@@ -2609,12 +2610,58 @@ impl ClusterInfo {
             submit_gossip_stats(&self.stats, &self.gossip, &stakes);
             *last_print = Instant::now();
         }
+
+        if let Some(last_update) = send_firedancer {
+            if last_update.elapsed() > Duration::from_secs(5) {
+                unsafe { self.firedancer_send_cluster_nodes() };
+                *last_update = Instant::now();
+            }
+        }
+
         self.stats
             .gossip_listen_loop_iterations_since_last_report
             .add_relaxed(1);
         Ok(())
     }
 
+    /// FIREDANCER: Constants for sending cluster nodes over IPC
+    const FIREDANCER_CLUSTER_NODE_CNT: u64 = 200*201;
+    const FIREDANCER_CLUSTER_NODE_SZ: u64 = 8 + Self::FIREDANCER_CLUSTER_NODE_CNT * 38;
+
+    /// FIREDANCER: Publish current gossiped cluster contact information to Firedancer
+    unsafe fn firedancer_send_cluster_nodes(
+        &self,
+    ) {
+        let peers = self.tvu_peers();
+        if peers.len() > Self::FIREDANCER_CLUSTER_NODE_CNT as usize {
+            warn!("cluster_nodes len {} exceeds max_elements {}", peers.len(), Self::FIREDANCER_CLUSTER_NODE_CNT);
+        }
+
+        let len = usize::min(Self::FIREDANCER_CLUSTER_NODE_CNT as usize, peers.len());
+
+        let mut memory: [u8; Self::FIREDANCER_CLUSTER_NODE_SZ as usize] = [0; Self::FIREDANCER_CLUSTER_NODE_SZ as usize];
+        memory[0..8].copy_from_slice(&len.to_le_bytes());
+
+        for (i, node) in peers.iter().enumerate().take(len) {
+            let pubkey_bytes = node.pubkey().to_bytes();
+            let tvu_socket = node.tvu(solana_client::connection_cache::Protocol::UDP).unwrap();
+            let (ip, port) = match tvu_socket {
+                SocketAddr::V4(addr) => (addr.ip().octets(), addr.port()),
+                SocketAddr::V6(_) => ([0; 4], 0),
+            };
+
+            let offset = 8 + i * 38;
+            memory[offset..offset+32].copy_from_slice(&pubkey_bytes);
+            memory[offset+32..offset+36].copy_from_slice(&ip);
+            memory[offset+36..offset+38].copy_from_slice(&port.to_le_bytes());
+        }
+
+        extern "C" {
+            fn fd_ext_poh_publish_cluster_info(data: *const u8, len: u64);
+        }
+        fd_ext_poh_publish_cluster_info(memory.as_ptr(), 8 + len as u64 * 38);
+    }
+    
     pub(crate) fn start_socket_consume_thread(
         self: Arc<Self>,
         receiver: PacketBatchReceiver,
@@ -2968,14 +3015,18 @@ impl Node {
         bind_ip_addr: IpAddr,
         public_tpu_addr: Option<SocketAddr>,
         public_tpu_forwards_addr: Option<SocketAddr>,
+        // FIREDANCER: The desired TPU port is passed in from the config.toml file
+        // so that it can be configured.
+        firedancer_tpu_port: u16,
+        firedancer_tvu_port: u16,
     ) -> Node {
         let (gossip_port, (gossip, ip_echo)) =
             Self::get_gossip_port(gossip_addr, port_range, bind_ip_addr);
 
-        let (tvu_port, tvu_sockets) =
+            let (_tvu_port, tvu_sockets) =
             multi_bind_in_range(bind_ip_addr, port_range, 8).expect("tvu multi_bind");
-        let (tvu_quic_port, tvu_quic) = Self::bind(bind_ip_addr, port_range);
-        let (tpu_port, tpu_sockets) =
+            let (_tvu_quic_port, tvu_quic) = Self::bind(bind_ip_addr, port_range);
+                    let (tpu_port, tpu_sockets) =
             multi_bind_in_range(bind_ip_addr, port_range, 32).expect("tpu multi_bind");
 
         let (_tpu_port_quic, tpu_quic) = Self::bind(
@@ -2994,8 +3045,8 @@ impl Node {
             ),
         );
 
-        let (tpu_vote_port, tpu_vote_sockets) =
-            multi_bind_in_range(bind_ip_addr, port_range, 1).expect("tpu_vote multi_bind");
+        let (_tpu_vote_port, tpu_vote_sockets) =
+        multi_bind_in_range(bind_ip_addr, port_range, 1).expect("tpu_vote multi_bind");
 
         let (_, retransmit_sockets) =
             multi_bind_in_range(bind_ip_addr, port_range, 8).expect("retransmit multi_bind");
@@ -3016,16 +3067,16 @@ impl Node {
         );
         let addr = gossip_addr.ip();
         info.set_gossip((addr, gossip_port)).unwrap();
-        info.set_tvu((addr, tvu_port)).unwrap();
-        info.set_tvu_quic((addr, tvu_quic_port)).unwrap();
-        info.set_tpu(public_tpu_addr.unwrap_or_else(|| SocketAddr::new(addr, tpu_port)))
-            .unwrap();
+        info.set_tvu((addr, firedancer_tvu_port)).unwrap();
+        info.set_tvu_quic((addr, firedancer_tvu_port)).unwrap();
+        info.set_tpu(public_tpu_addr.unwrap_or_else(|| SocketAddr::new(addr, firedancer_tpu_port)))
+        .unwrap();
         info.set_tpu_forwards(
-            public_tpu_forwards_addr.unwrap_or_else(|| SocketAddr::new(addr, tpu_forwards_port)),
+            public_tpu_forwards_addr.unwrap_or_else(|| SocketAddr::new(addr, firedancer_tpu_port)),
         )
         .unwrap();
-        info.set_tpu_vote((addr, tpu_vote_port)).unwrap();
-        info.set_serve_repair((addr, serve_repair_port)).unwrap();
+    info.set_tpu_vote((addr, firedancer_tpu_port)).unwrap();
+    info.set_serve_repair((addr, serve_repair_port)).unwrap();
         info.set_serve_repair_quic((addr, serve_repair_quic_port))
             .unwrap();
         trace!("new ContactInfo: {:?}", info);
@@ -3583,6 +3634,8 @@ mod tests {
             IpAddr::V4(ip),
             None,
             None,
+            0,
+            0
         );
 
         check_node_sockets(&node, IpAddr::V4(ip), VALIDATOR_PORT_RANGE);
@@ -3606,6 +3659,8 @@ mod tests {
             ip,
             None,
             None,
+            0,
+            0
         );
 
         check_node_sockets(&node, ip, port_range);

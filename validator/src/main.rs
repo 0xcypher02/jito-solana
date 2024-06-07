@@ -68,7 +68,7 @@ use {
     solana_send_transaction_service::send_transaction_service,
     solana_streamer::socket::SocketAddrSpace,
     solana_tpu_client::tpu_client::DEFAULT_TPU_ENABLE_UDP,
-    solana_validator::{
+    crate::{
         admin_rpc_service,
         admin_rpc_service::{load_staked_nodes_overrides, StakedNodesOverrides},
         bootstrap,
@@ -464,11 +464,17 @@ fn configure_banking_trace_dir_byte_limit(
     };
 }
 
-pub fn main() {
+// FIREDANCER: Switch main to be a function that takes arguments, rather than
+// an actual entrypoint for the binary.
+pub fn main<I, T>(itr: I)
+where
+        I: IntoIterator<Item = T>,
+        T: Into<std::ffi::OsString> + Clone {
+    let args: Vec<std::ffi::OsString> = itr.into_iter().map(|x| x.into()).collect();
     let default_args = DefaultArgs::new();
     let solana_version = solana_version::version!();
     let cli_app = app(solana_version, &default_args);
-    let matches = cli_app.get_matches();
+    let matches = cli_app.get_matches_from(&args);
     warn_for_deprecated_arguments(&matches);
 
     let socket_addr_space = SocketAddrSpace::new(matches.is_present("allow_private_addr"));
@@ -1070,10 +1076,81 @@ pub fn main() {
         }
     };
     let use_progress_bar = logfile.is_none();
-    let _logger_thread = redirect_stderr_to_file(logfile);
+// FIREDANCER: Redirect logging to Firedancer
+    // let _logger_thread = redirect_stderr_to_file(logfile);
+    let _ = redirect_stderr_to_file; // Silence unused warning
+    extern "C" {
+        fn fd_log_private_1(level: i32, now: i64, file: *const i8, line: i32, func: *const i8, msg: *const i8);
+        fn fd_log_wallclock() -> i64;
+        fn fd_log_level_logfile() -> i32;
+    }
 
+    struct FDLogger {}
+
+    impl log::Log for FDLogger {
+        fn enabled(&self, metadata: &log::Metadata) -> bool {
+            match metadata.level() {
+                log::Level::Error | log::Level::Warn => true,
+                log::Level::Info | log::Level::Debug | log::Level::Trace => false,
+            }
+        }
+
+        fn log(&self, record: &log::Record) {
+            match record.level() {
+                log::Level::Error | log::Level::Warn => (),
+                log::Level::Info | log::Level::Debug | log::Level::Trace => return,
+            };
+
+            let level: i32 = match record.level() {
+                log::Level::Error => 4,
+                log::Level::Warn => 3,
+                log::Level::Info => 2,
+                log::Level::Debug => 1,
+                log::Level::Trace => 0,
+            };
+
+            const UNKNOWN: &'static str = "unknown";
+
+            let file = if let Some(file) = record.file() {
+                std::ffi::CString::new(file).unwrap_or(std::ffi::CString::new(UNKNOWN).unwrap())
+            } else {
+                std::ffi::CString::new(UNKNOWN).unwrap()
+            };
+
+            let msg = std::ffi::CString::new(record.args().to_string()).unwrap_or(std::ffi::CString::new(UNKNOWN).unwrap());
+            let target = std::ffi::CString::new(record.target()).unwrap_or(std::ffi::CString::new(UNKNOWN).unwrap());
+
+            unsafe {
+                // We reroute log messages to the Firedancer logger.
+                // There are a few problems with this.  The message should be
+                // printed into the target buffer, rather than a heap
+                // allocated string. None the less, it's good enough for now.
+                fd_log_private_1(
+                    level,
+                    fd_log_wallclock(),
+                    file.as_ptr(),
+                    record.line().unwrap_or(0) as i32,
+                    target.as_ptr(),
+                    msg.as_ptr());
+            }
+        }
+
+        fn flush(&self) {}
+    }
+    let _logger_thread: Option<std::thread::JoinHandle<()>> = None;
+    static LOGGER: FDLogger = FDLogger {};
+    let log_level = match unsafe { fd_log_level_logfile() } {
+        0 => LevelFilter::Trace,
+        1 => LevelFilter::Debug,
+        2 => LevelFilter::Info,
+        3 => LevelFilter::Warn,
+        4 => LevelFilter::Error,
+        _ => LevelFilter::Off,
+    };
+    log::set_logger(&LOGGER).map(|()| log::set_max_level(log_level)).unwrap();
+    
     info!("{} {}", crate_name!(), solana_version);
-    info!("Starting validator with: {:#?}", std::env::args_os());
+    info!("Starting validator with: {:#?}", args);
 
     let cuda = matches.is_present("cuda");
     if cuda {
@@ -2039,6 +2116,10 @@ pub fn main() {
         .map(ContactInfo::new_gossip_entry_point)
         .collect::<Vec<_>>();
 
+        let firedancer_tpu_port = value_t_or_exit!(matches, "firedancer_tpu_port", u16);
+        let firedancer_tvu_port = value_t_or_exit!(matches, "firedancer_tvu_port", u16);
+
+
     let mut node = Node::new_with_external_ip(
         &identity_keypair.pubkey(),
         &gossip_addr,
@@ -2046,6 +2127,8 @@ pub fn main() {
         bind_address,
         public_tpu_addr,
         public_tpu_forwards_addr,
+        firedancer_tpu_port,
+        firedancer_tvu_port,
     );
 
     if restricted_repair_only_mode {

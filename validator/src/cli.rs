@@ -1518,6 +1518,20 @@ pub fn app<'a>(version: &'a str, default_args: &'a DefaultArgs) -> App<'a, 'a> {
                     further debugging.
                 ")
         )
+        .arg(
+            Arg::with_name("firedancer_tpu_port")
+                .long("firedancer-tpu-port")
+                .takes_value(true)
+                .validator(is_parsable::<u16>)
+                .help("Port to use for receiving transactions in the TPU."),
+        )
+        .arg(
+            Arg::with_name("firedancer_tvu_port")
+                .long("firedancer-tvu-port")
+                .takes_value(true)
+                .validator(is_parsable::<u16>)
+                .help("Port to use for receiving transactions in the TVU."),
+        )
         .args(&get_deprecated_arguments())
         .after_help("The default subcommand is run")
         .subcommand(

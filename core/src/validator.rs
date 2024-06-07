@@ -1112,6 +1112,7 @@ impl Validator {
             should_check_duplicate_instance,
             Some(stats_reporter_sender.clone()),
             exit.clone(),
+            true
         );
         let serve_repair = ServeRepair::new(
             cluster_info.clone(),
