@@ -48,7 +48,9 @@ pub extern "C" fn fd_ext_poh_register_tick( bank: *const c_void, hash: *const u8
     unsafe { (*(bank as *const Bank)).register_tick(&hash, &RwLock::new(None)) };
 }
 
-pub struct PohRecorder {}
+pub struct PohRecorder {
+    ticks_per_slot: u64
+}
 
 impl PohRecorder {
     #[allow(clippy::too_many_arguments)]
@@ -80,7 +82,7 @@ impl PohRecorder {
         /* Forget so the receiver doesn't see the channel is disconnected. */
         std::mem::forget(dummy1.0);
         std::mem::forget(dummy2.0);
-        (Self {}, dummy1.1, dummy2.1)
+        (Self {ticks_per_slot}, dummy1.1, dummy2.1)
     }
 
     pub fn leader_after_n_slots(&self, slots: u64) -> Option<Pubkey> {
@@ -98,7 +100,7 @@ impl PohRecorder {
     pub fn ticks_per_slot(&self) -> u64 {
         self.ticks_per_slot
     }
-    
+
     pub fn leader_and_slot_after_n_slots(
         &self,
         _slots_in_the_future: u64,
