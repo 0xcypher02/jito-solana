@@ -95,6 +95,10 @@ impl PohRecorder {
         }
     }
 
+    pub fn ticks_per_slot(&self) -> u64 {
+        self.ticks_per_slot
+    }
+    
     pub fn leader_and_slot_after_n_slots(
         &self,
         _slots_in_the_future: u64,
